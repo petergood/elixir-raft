@@ -1,40 +1,42 @@
 defmodule RaftNodeTest do
   use ExUnit.Case, async: true
   import Mock
-  doctest Elixirraft
+
+  setup_with_mocks([
+    {DateTime, [:passthrough], [utc_now: fn() ->
+      {:ok, date, 0} = DateTime.from_iso8601("2023-07-29T23:50:07Z")
+      date
+    end]}
+  ]) do
+    :ok
+  end
 
   describe "append_entries" do
     test "returns current term" do
+      {:ok, last_heartbeat, 0} = DateTime.from_iso8601("2023-07-29T23:50:07Z")
+
       state = %RaftNodeState{current_term: 41}
       response = RaftNode.handle_call({:append_entries, %AppendEntriesRequest{}}, nil, state)
 
-      assert {:reply, %AppendEntriesResponse{term: 41, success: true}, state} = response
+      expected_state = %RaftNodeState{state | last_leader_heartbeat: last_heartbeat}
+      assert {:reply, %AppendEntriesResponse{term: 41, success: true}, ^expected_state} = response
     end
   end
 
   describe "check_leader_heartbeat" do
-    setup_with_mocks([
-      {DateTime, [:passthrough], [utc_now: fn() ->
-        {:ok, date, 0} = DateTime.from_iso8601("2023-07-29T23:50:07Z")
-        date
-      end]}
-    ]) do
-      :ok
-    end
-
     test "transitions into candidate state when timeout exceeded" do
       with_mock GenServer, [cast: fn(_node, _request) -> :ok end] do
         {:ok, last_heartbeat, 0} = DateTime.from_iso8601("2023-07-28T23:50:07Z")
         state = %RaftNodeState{
           current_term: 41,
           last_leader_heartbeat: last_heartbeat,
-          node_config: %RaftNodeConfiguration{leader_timeout_ms: 1000, nodes: ['node1', 'node2']}
+          node_config: %RaftNodeConfiguration{leader_timeout_ms: 1000, nodes: ['node1', 'node2'], node_id: 1}
         }
 
         response = RaftNode.handle_info(:check_leader_heartbeat, state)
 
         assert {:noreply, %RaftNodeState{state: :candidate, current_term: 42}} = response
-        assert_called GenServer.cast(:VoteOrchestrator, {:begin_election, ['node1', 'node2'], 42})
+        assert_called GenServer.cast({:global, {:VoteOrchestrator, 1}}, {:begin_election, ['node1', 'node2'], 42})
       end
     end
 
@@ -99,12 +101,12 @@ defmodule RaftNodeTest do
 
   describe "cast election_complete" do
     test "moves into leader state upon winning election" do
-      response = RaftNode.handle_cast({:election_complete, true, 42}, %RaftNodeState{})
+      response = RaftNode.handle_cast({:election_complete, true, 42}, %RaftNodeState{node_config: %RaftNodeConfiguration{}})
       assert {:noreply, %RaftNodeState{state: :leader, current_term: 42}} = response
     end
 
     test "moves into follower state upon loosing election" do
-      response = RaftNode.handle_cast({:election_complete, false, 42}, %RaftNodeState{})
+      response = RaftNode.handle_cast({:election_complete, false, 42}, %RaftNodeState{node_config: %RaftNodeConfiguration{}})
       assert {:noreply, %RaftNodeState{state: :follower, current_term: 42}} = response
     end
   end
